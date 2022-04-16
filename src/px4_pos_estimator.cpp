@@ -1,32 +1,3 @@
-/***************************************************************************************************************************
- * px4_pos_estimator.cpp
- *
- *
- * Update Time: 2019.3.10
- *
- * 说明: mavros位置估计程序
- *      1. 订阅激光SLAM (cartorgrapher_ros节点) 发布的位置信息,从laser坐标系转换至NED坐标系
- *      2. 订阅Mocap设备 (vrpn-client-ros节点) 发布的位置信息，从mocap坐标系转换至NED坐标系
- *      3. 订阅飞控发布的位置、速度及欧拉角信息，作对比用
- *      4. 存储飞行数据，实验分析及作图使用
- *      5. 选择激光SLAM或者Mocap设备作为位置来源，发布位置及偏航角(xyz+yaw)给飞控
- *
-***************************************************************************************************************************/
-/***************************************************************************************************************************
-* px4_pos_controller.cpp
-*
-* Author: Qyp
-*
-* Update Time: 2019.3.16
-*
-* Introduction:  PX4 Position Estimator using external positioning equipment
-*         1. Subscribe position and yaw information from Lidar SLAM node(cartorgrapher_ros节点), transfrom from laser frame to ENU frame
-*         2. Subscribe position and yaw information from Vicon node(vrpn-client-ros节点), transfrom from vicon frame to ENU frame
-*         3. Send the position and yaw information to FCU using Mavros package (/mavros/mocap/pose or /mavros/vision_estimate/pose)
-*         4. Subscribe position and yaw information from FCU, used for compare
-***************************************************************************************************************************/
-
-
 //头文件
 #include <ros/ros.h>
 
@@ -56,33 +27,38 @@
 #include <sensor_msgs/Range.h>
 
 #include <geometry_msgs/PoseWithCovarianceStamped.h>
+#include <nlink_parser/LinktrackNodeframe2.h>
+#include <nav_msgs/Odometry.h>
 
 
 using namespace std;
 //---------------------------------------相关参数-----------------------------------------------
 bool ready_for_pub = false;
-int flag_use_laser_or_vicon;                               //0:使用mocap数据作为定位数据 1:使用laser数据作为定位数据
-//---------------------------------------vicon定位相关------------------------------------------
-Eigen::Vector3d pos_drone_mocap;                          //无人机当前位置 (vicon)
-Eigen::Quaterniond q_mocap;
-Eigen::Vector3d Euler_mocap;                              //无人机当前姿态 (vicon)
+int pose_source = 0;
+
 //---------------------------------------laser定位相关------------------------------------------
 Eigen::Vector3d pos_drone_laser;                          //无人机当前位置 (laser)
 Eigen::Quaterniond q_laser;
 Eigen::Vector3d Euler_laser;                                         //无人机当前姿态(laser)
-
 geometry_msgs::TransformStamped laser;                          //当前时刻cartorgrapher发布的数据
 geometry_msgs::TransformStamped laser_last;
 
+//---------------------------------------t265定位相关------------------------------------------
+Eigen::Vector3d pos_drone_t265;
+Eigen::Quaterniond q_t265;
+Eigen::Vector3d Euler_t265;
+geometry_msgs::TransformStamped t265;
+geometry_msgs::TransformStamped t265_last;
+
+//---------------------------------------uwb定位相关------------------------------------------
+Eigen::Vector3d pos_drone_uwb;
+Eigen::Quaterniond q_uwb;
+Eigen::Vector3d Euler_uwb;
+geometry_msgs::TransformStamped uwb;
+geometry_msgs::TransformStamped uwb_last;
+
+
 double tfmini_raw;
-//---------------------------------------realsense定位相关------------------------------------------
-Eigen::Vector3d pos_drone_realsense;
-Eigen::Quaterniond q_realsense;
-Eigen::Vector3d  Euler_realsense;
-
-geometry_msgs::TransformStamped realsense;
-geometry_msgs::TransformStamped realsense_last;
-
 //---------------------------------------无人机位置及速度--------------------------------------------
 Eigen::Vector3d pos_drone_fcu;                           //无人机当前位置 (来自fcu)
 Eigen::Vector3d vel_drone_fcu;                           //无人机上一时刻位置 (来自fcu)
@@ -90,8 +66,8 @@ Eigen::Vector3d vel_drone_fcu;                           //无人机上一时刻
 Eigen::Quaterniond q_fcu;
 Eigen::Vector3d Euler_fcu;                                          //无人机当前欧拉角(来自fcu)
 //---------------------------------------发布相关变量--------------------------------------------
-//geometry_msgs::PoseStamped vision;
-geometry_msgs::PoseWithCovarianceStamped vision;
+geometry_msgs::PoseStamped vision;
+//geometry_msgs::PoseWithCovarianceStamped vision;
 //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>函数声明<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 float get_dt(ros::Time last);                                                        //获取时间间隔
 void printf_info();     
@@ -101,11 +77,10 @@ void laser_cb(const tf2_msgs::TFMessage::ConstPtr& msg)
 {
     //确定是cartographer发出来的/tf信息
     //有的时候/tf这个消息的发布者不止一个
-    //if (msg->transforms[0].header.frame_id == "map")//dyx  carto_odom
     if (msg->transforms.size()>1 && msg->transforms[1].header.frame_id == "carto_odom")
     {
-        //laser = msg->transforms[0];
         laser = msg->transforms[1];
+        //laser = msg->transforms[0];
 
         float dt_laser;
 
@@ -126,26 +101,36 @@ void laser_cb(const tf2_msgs::TFMessage::ConstPtr& msg)
             // Transform the Quaternion to Euler Angles
             Euler_laser = quaternion_to_euler(q_laser);
         }
-
         laser_last = laser;
     }
 }
-void sonic_cb(const std_msgs::UInt16::ConstPtr& msg)
+
+void t265_cb(const nav_msgs::Odometry::ConstPtr& msg)
 {
-    std_msgs::UInt16 sonic;
+    if (msg->header.frame_id == "camera_odom_frame")
+    {
+        pos_drone_t265[0] = msg->pose.pose.position.x;
+        pos_drone_t265[1] = msg->pose.pose.position.y;
+        //pos_drone_t265[2] = msg->pose.pose.position.z;
+        pos_drone_t265[2] = pos_drone_fcu[2];
+        Eigen::Quaterniond q_t265_enu(msg->pose.pose.orientation.w, msg->pose.pose.orientation.x, msg->pose.pose.orientation.y, msg->pose.pose.orientation.z);
+        q_t265 = q_t265_enu;
+        Euler_t265 = quaternion_to_euler(q_t265);
+    }
+}
 
-    sonic = *msg;
-
-    //位置
-    pos_drone_laser[2]  = (float)sonic.data / 1000;
+void uwb_tagCallback(const nlink_parser::LinktrackNodeframe2 &msg)
+{
+    //ROS_INFO("msg LinktrackTagframe0 received,systemTime: %d", msg.systemTime);
+    pos_drone_uwb[0] = msg.pos[0];
+    pos_drone_uwb[1] = msg.pos[1];
+    Eigen::Quaterniond q_uwb_enu(msg.q[0], msg.q[1], msg.q[2], msg.q[3]);
+    q_uwb = q_uwb_enu;
+    Euler_uwb = quaternion_to_euler(q_uwb);
 }
 
 void tfmini_cb(const sensor_msgs::Range::ConstPtr& msg)
 {
-    //sensor_msgs::Range tfmini;
-    //tfmini = *msg;
-    //位置
-    //pos_drone_laser[2]  = tfmini.range ;
     tfmini_raw = msg->range;
 }
 
@@ -157,55 +142,6 @@ double vrt_h_map(const double& tfmini_raw,const double& roll,const double& pitch
     //精度只取小数点后两位
     vrt_h = double(int(vrt_h*100)/100.0);
     return vrt_h;
-}
-
-
-void realsense_cb(const tf2_msgs::TFMessage::ConstPtr& msg)
-{
-  if (msg->transforms[0].header.frame_id == "camera_odom_frame")
-  {
-    realsense = msg->transforms[0];
-    float dt_realsense;
-    dt_realsense = (realsense.header.stamp.sec - realsense_last.header.stamp.sec) + (realsense.header.stamp.nsec - realsense_last.header.stamp.nsec)/10e9;
-    if (dt_realsense != 0)
-    {
-      pos_drone_realsense[0]  = realsense.transform.translation.x;
-      pos_drone_realsense[1]  = realsense.transform.translation.y;
-      pos_drone_realsense[2]  = realsense.transform.translation.z + 0.1;
-
-      Eigen::Quaterniond q_realsense_enu(realsense.transform.rotation.w, realsense.transform.rotation.x, realsense.transform.rotation.y, realsense.transform.rotation.z);
-      q_realsense = q_realsense_enu;
-      Euler_realsense = quaternion_to_euler(q_realsense);
-    }
-    realsense_last = realsense;
-  }
-}
-
-
-void optitrack_cb(const geometry_msgs::PoseStamped::ConstPtr& msg)
-{
-    //位置 -- optitrack系 到 ENU系
-    int optitrack_frame = 1; //Frame convention 0: Z-up -- 1: Y-up
-    // Read the Drone Position from the Vrpn Package [Frame: Vicon]  (Vicon to ENU frame)
-    Eigen::Vector3d pos_drone_mocap_enu(-msg->pose.position.x,msg->pose.position.z,msg->pose.position.y);
-
-    pos_drone_mocap = pos_drone_mocap_enu;
-
-    if(optitrack_frame == 0){
-        // Read the Quaternion from the Vrpn Package [Frame: Vicon[ENU]]
-        Eigen::Quaterniond q_mocap_enu(msg->pose.orientation.w, msg->pose.orientation.x, msg->pose.orientation.y, msg->pose.orientation.z);
-        q_mocap = q_mocap_enu;
-    }
-    else
-    {
-        // Read the Quaternion from the Vrpn Package [Frame: Vicon[ENU]]
-        Eigen::Quaterniond q_mocap_enu(msg->pose.orientation.w, msg->pose.orientation.x, msg->pose.orientation.z, msg->pose.orientation.y); //Y-up convention, switch the q2 & q3
-        q_mocap = q_mocap_enu;
-    }
-
-    // Transform the Quaternion to Euler Angles
-    Euler_mocap = quaternion_to_euler(q_mocap);
-
 }
 
 void pos_cb(const geometry_msgs::PoseStamped::ConstPtr &msg)
@@ -233,9 +169,7 @@ void vel_cb(const geometry_msgs::TwistStamped::ConstPtr &msg)
 
 void euler_cb(const sensor_msgs::Imu::ConstPtr& msg)
 {
-
-
-    // Transform the Quaternion from ENU to NED
+   // Transform the Quaternion from ENU to NED
    // Eigen::Quaterniond q_ned = transform_orientation_enu_to_ned( transform_orientation_baselink_to_aircraft(q_fcu_enu) );
 }
 
@@ -244,24 +178,16 @@ int main(int argc, char **argv)
 {
     ros::init(argc, argv, "px4_pos_estimator");
     ros::NodeHandle nh("~");
-
-    //读取参数表中的参数
-    // 使用激光SLAM数据orVicon数据 0 for vicon， 1 for 激光SLAM
-    nh.param<int>("flag_use_laser_or_vicon", flag_use_laser_or_vicon, 0);
-
+    nh.param<int>("pose_source", pose_source, 0); //0---cartographer 1---t265 2---uwb
     // 【订阅】cartographer估计位置
     ros::Subscriber laser_sub = nh.subscribe<tf2_msgs::TFMessage>("/tf", 1000, laser_cb);
-    // 【订阅】realsense估计位置
-    ros::Subscriber realsense_sub = nh.subscribe<tf2_msgs::TFMessage>("/tf", 1000, realsense_cb);
-
-    // 【订阅】超声波的数据
-    ros::Subscriber sonic_sub = nh.subscribe<std_msgs::UInt16>("/sonic", 100, sonic_cb);
+    // 【订阅】t265估计位置
+    ros::Subscriber t265_sub = nh.subscribe<nav_msgs::Odometry>("/camera/odom/sample", 1000, t265_cb);
+    // 【订阅】uwb估计位置
+    ros::Subscriber sub = nh.subscribe("/nlink_linktrack_nodeframe2", 1000, uwb_tagCallback);
 
     // 【订阅】tf mini的数据
     ros::Subscriber tfmini_sub = nh.subscribe<sensor_msgs::Range>("/TFmini/TFmini", 100, tfmini_cb);
-
-    // 【订阅】optitrack估计位置
-    ros::Subscriber optitrack_sub = nh.subscribe<geometry_msgs::PoseStamped>("/vrpn_client_node/UAV/pose", 1000, optitrack_cb);
 
     // 【订阅】无人机当前位置 坐标系:ENU系 [室外：GPS，室内：自主定位或mocap等] 这里订阅仅作比较用
     ros::Subscriber position_sub = nh.subscribe<geometry_msgs::PoseStamped>("/mavros/local_position/pose", 10, pos_cb);
@@ -274,8 +200,8 @@ int main(int argc, char **argv)
 
     // 【发布】无人机位置和偏航角 坐标系 ENU系
     //  本话题要发送飞控(通过mavros_extras/src/plugins/vision_pose_estimate.cpp发送), 对应Mavlink消息为VISION_POSITION_ESTIMATE(#??), 对应的飞控中的uORB消息为vehicle_vision_position.msg 及 vehicle_vision_attitude.msg
-    //ros::Publisher vision_pub = nh.advertise<geometry_msgs::PoseStamped>("/mavros/vision_pose/pose", 100);
-    ros::Publisher vision_pub = nh.advertise<geometry_msgs::PoseWithCovarianceStamped>("/mavros/vision_pose/pose_cov", 100);
+    ros::Publisher vision_pub = nh.advertise<geometry_msgs::PoseStamped>("/mavros/vision_pose/pose", 100);
+    //ros::Publisher vision_pub = nh.advertise<geometry_msgs::PoseWithCovarianceStamped>("/mavros/vision_pose/pose", 100);
     ros::Timer pose_pub_timer = nh.createTimer(ros::Duration(1.0/20.0),pose_pub_timer_cb);
     // 频率
     ros::Rate rate(20.0);
@@ -300,68 +226,48 @@ int main(int argc, char **argv)
 
 void pose_pub_timer_cb(const ros::TimerEvent& TE)
 {
-    //进行垂直高度的映射，反映真实的z轴高度  //dyx
-    //pos_drone_laser[2] = vrt_h_map(tfmini_raw,Euler_fcu[0],Euler_fcu[1]);
-    pos_drone_laser[2] = pos_drone_fcu[2];
-    //ROS_INFO("%f  %f  %f\n",pos_drone_laser[2],Euler_fcu[0],Euler_fcu[1]);
-
-    //vicon
-    if(flag_use_laser_or_vicon == 0)
+    //source -from cartographer
+    if (pose_source == 0)   
     {
-        vision.pose.pose.position.x = pos_drone_mocap[0] ;
-        vision.pose.pose.position.y = pos_drone_mocap[1] ;
-        vision.pose.pose.position.z = pos_drone_mocap[2] ;
+        pos_drone_laser[2] = pos_drone_fcu[2];
+        vision.pose.position.x = pos_drone_laser[0];
+        vision.pose.position.y = pos_drone_laser[1];
+        vision.pose.position.z = pos_drone_laser[2];
 
-        vision.pose.pose.orientation.x = q_mocap.x();
-        vision.pose.pose.orientation.y = q_mocap.y();
-        vision.pose.pose.orientation.z = q_mocap.z();
-        vision.pose.pose.orientation.w = q_mocap.w();
-
-        vision.pose.covariance = { 0.01, 0, 0, 0, 0, 0,
-                                   0, 0.01, 0, 0, 0, 0,
-                                   0, 0, 10000000000.0, 0, 0, 0,
-                                   0, 0, 0, 10000000000.0, 0, 0,
-                                   0, 0, 0, 0, 10000000000.0, 0,
-                                   0, 0, 0, 0, 0, 0.05}; //dyx
-
-    }//laser
-    else if (flag_use_laser_or_vicon == 1)
-    {
-        vision.pose.pose.position.x = pos_drone_laser[0];
-        vision.pose.pose.position.y = pos_drone_laser[1];
-        vision.pose.pose.position.z = pos_drone_laser[2];
-
-        vision.pose.pose.orientation.x = q_laser.x();
-        vision.pose.pose.orientation.y = q_laser.y();
-        vision.pose.pose.orientation.z = q_laser.z();
-        vision.pose.pose.orientation.w = q_laser.w();
-
-        vision.pose.covariance = { 0.01, 0, 0, 0, 0, 0,
-                                   0, 0.01, 0, 0, 0, 0,
-                                   0, 0, 10000000000.0, 0, 0, 0,
-                                   0, 0, 0, 10000000000.0, 0, 0,
-                                   0, 0, 0, 0, 10000000000.0, 0,
-                                   0, 0, 0, 0, 0, 0.05}; //dyx
-    }//realsense
-    else if (flag_use_laser_or_vicon == 2)
-    {
-        vision.pose.pose.position.x = pos_drone_realsense[0];
-        vision.pose.pose.position.y = pos_drone_realsense[1];
-        vision.pose.pose.position.z = pos_drone_realsense[2];
-
-        vision.pose.pose.orientation.x = q_realsense.x();
-        vision.pose.pose.orientation.y = q_realsense.y();
-        vision.pose.pose.orientation.z = q_realsense.z();
-        vision.pose.pose.orientation.w = q_realsense.w();
-
-        vision.pose.covariance = { 0.01, 0, 0, 0, 0, 0,
-                                   0, 0.01, 0, 0, 0, 0,
-                                   0, 0, 10000000000.0, 0, 0, 0,
-                                   0, 0, 0, 10000000000.0, 0, 0,
-                                   0, 0, 0, 0, 10000000000.0, 0,
-                                   0, 0, 0, 0, 0, 0.05}; //dyx
+        vision.pose.orientation.x = q_laser.x();
+        vision.pose.orientation.y = q_laser.y();
+        vision.pose.orientation.z = q_laser.z();
+        vision.pose.orientation.w = q_laser.w();
+        vision.header.stamp = TE.current_real;
     }
-    vision.header.stamp = TE.current_real;
+    //source -from t265
+    if (pose_source == 1)
+    {
+        //pos_drone_t265[2] = pos_drone_fcu[2];
+        vision.pose.position.x = pos_drone_t265[0];
+        vision.pose.position.y = pos_drone_t265[1];
+        vision.pose.position.z = pos_drone_t265[2];
+
+        vision.pose.orientation.x = q_t265.x();
+        vision.pose.orientation.y = q_t265.y();
+        vision.pose.orientation.z = q_t265.z();
+        vision.pose.orientation.w = q_t265.w();
+        vision.header.stamp = TE.current_real;
+    }
+    //source -from uwb
+    if (pose_source == 2)
+    {
+        pos_drone_uwb[2] = pos_drone_fcu[2];
+        vision.pose.position.x = pos_drone_uwb[0];
+        vision.pose.position.y = pos_drone_uwb[1];
+        vision.pose.position.z = pos_drone_uwb[2];
+
+        vision.pose.orientation.x = q_uwb.x();
+        vision.pose.orientation.y = q_uwb.y();
+        vision.pose.orientation.z = q_uwb.z();
+        vision.pose.orientation.w = q_uwb.w();
+        vision.header.stamp = TE.current_real;
+    }
     ready_for_pub = true;
 }
 
@@ -389,26 +295,27 @@ void printf_info()
     cout.setf(ios::showpoint);
     // 强制显示符号
     cout.setf(ios::showpos);
-
-    //using vicon system
-    if(flag_use_laser_or_vicon == 0)
-    {
-        cout <<">>>>>>>>>>>>>>>>>>>>>>>>Vicon Info [ENU Frame]<<<<<<<<<<<<<<<<<<<<<<<<<" <<endl;
-        cout << "Pos_vicon [X Y Z] : " << pos_drone_mocap[0] << " [ m ] "<< pos_drone_mocap[1] <<" [ m ] "<< pos_drone_mocap[2] <<" [ m ] "<<endl;
-        cout << "Euler_vicon [Yaw] : " << Euler_mocap[2] * 180/M_PI<<" [deg]  "<<endl;
-    }else if(flag_use_laser_or_vicon == 1)
+    if (pose_source == 0)
     {
         cout <<">>>>>>>>>>>>>>>>>>>>>>>>Laser Info [ENU Frame]<<<<<<<<<<<<<<<<<<<<<<<<<" <<endl;
         cout << "Pos_laser [X Y Z] : " << pos_drone_laser[0] << " [ m ] "<< pos_drone_laser[1] <<" [ m ] "<< pos_drone_laser[2] <<" [ m ] "<<endl;
         cout << "Euler_vlaser[Yaw] : " << Euler_laser[2] * 180/M_PI<<" [deg]  "<<endl;
-    }else if(flag_use_laser_or_vicon == 2)
-    {
-        cout <<">>>>>>>>>>>>>>>>>>>>>>>>Realsense Info [ENU Frame]<<<<<<<<<<<<<<<<<<<<<<<<<" <<endl;
-        cout << "Pos_realsense [X Y Z] : " << pos_drone_realsense[0] << " [ m ] "<< pos_drone_realsense[1] <<" [ m ] "<< pos_drone_realsense[2] <<" [ m ] "<<endl;
-        cout << "Euler_vrealsense[Yaw] : " << Euler_realsense[2] * 180/M_PI<<" [deg]  "<<endl;
     }
-        cout <<">>>>>>>>>>>>>>>>>>>>>>>>FCU Info [ENU Frame]<<<<<<<<<<<<<<<<<<<<<<<<<<<" <<endl;
-        cout << "Pos_fcu [X Y Z] : " << pos_drone_fcu[0] << " [ m ] "<< pos_drone_fcu[1] <<" [ m ] "<< pos_drone_fcu[2] <<" [ m ] "<<endl;
-        cout << "Vel_fcu [X Y Z] : " << vel_drone_fcu[0] << " [m/s] "<< vel_drone_fcu[1] <<" [m/s] "<< vel_drone_fcu[2] <<" [m/s] "<<endl;
-        cout << "Euler_fcu [Yaw] : " << Euler_fcu[2] * 180/M_PI<<" [deg] "<<endl;
+    if (pose_source == 1)
+    {
+        cout <<">>>>>>>>>>>>>>>>>>>>>>>>T265 Info [ENU Frame]<<<<<<<<<<<<<<<<<<<<<<<<<" <<endl;
+        cout << "Pos_t265 [X Y Z] : " << pos_drone_t265[0] << " [ m ] "<< pos_drone_t265[1] <<" [ m ] "<< pos_drone_t265[2] <<" [ m ] "<<endl;
+        cout << "Euler_t265[Yaw] : " << Euler_t265[2] * 180/M_PI<<" [deg]  "<<endl;       
+    }
+    if (pose_source == 2)
+    {
+        cout <<">>>>>>>>>>>>>>>>>>>>>>>>Uwb Info [ENU Frame]<<<<<<<<<<<<<<<<<<<<<<<<<" <<endl;
+        cout << "Pos_uwb [X Y Z] : " << pos_drone_uwb[0] << " [ m ] "<< pos_drone_uwb[1] <<" [ m ] "<< pos_drone_uwb[2] <<" [ m ] "<<endl;
+        cout << "Euler_uwb[Yaw] : " << Euler_uwb[2] * 180/M_PI<<" [deg]  "<<endl;       
+    }
+
+    cout <<">>>>>>>>>>>>>>>>>>>>>>>>FCU Info [ENU Frame]<<<<<<<<<<<<<<<<<<<<<<<<<<<" <<endl;
+    cout << "Pos_fcu [X Y Z] : " << pos_drone_fcu[0] << " [ m ] "<< pos_drone_fcu[1] <<" [ m ] "<< pos_drone_fcu[2] <<" [ m ] "<<endl;
+    cout << "Vel_fcu [X Y Z] : " << vel_drone_fcu[0] << " [m/s] "<< vel_drone_fcu[1] <<" [m/s] "<< vel_drone_fcu[2] <<" [m/s] "<<endl;
+    cout << "Euler_fcu [Yaw] : " << Euler_fcu[2] * 180/M_PI<<" [deg] "<<endl;
 }

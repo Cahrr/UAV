@@ -1,18 +1,3 @@
-/***************************************************************************************************************************
-* command_to_mavros.h
-*
-* Author: Qyp
-*
-* Update Time: 2019.5.1
-*
-* Introduction:  Drone control command send class using Mavros package
-*         1. Ref to the Mavros plugins (setpoint_raw, loca_position, imu and etc..)
-*         2. Ref to the Offboard Flight task in PX4 code: https://github.com/PX4/Firmware/blob/master/src/lib/FlightTasks/tasks/Offboard/FlightTaskOffboard.cpp
-*         3. Ref to the Mavlink module in PX4 code: https://github.com/PX4/Firmware/blob/master/src/modules/mavlink/mavlink_receiver.cpp
-*         4. Ref to the position control module in PX4: https://github.com/PX4/Firmware/blob/master/src/modules/mc_pos_control
-*         5. Ref to the attitude control module in PX4: https://github.com/PX4/Firmware/blob/master/src/modules/mc_att_control
-*         6. 还需要考虑复合形式的输出情况
-***************************************************************************************************************************/
 #ifndef COMMAND_TO_MAVROS_H
 #define COMMAND_TO_MAVROS_H
 

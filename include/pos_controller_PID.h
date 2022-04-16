@@ -1,24 +1,5 @@
-/***************************************************************************************************************************
-* pos_controller_PID.h
-*
-* Author: Qyp
-*
-* Update Time: 2019.5.1
-*
-* Introduction:  Position Controller using PID (P for pos loop, pid for vel loop)
-*         1. Similiar to the position controller in PX4 (1.8.2)
-*         2. Ref to : https://github.com/PX4/Firmware/blob/master/src/modules/mc_pos_control/PositionControl.cpp
-*         3. Here we didn't consider the mass of the drone, we treat accel_sp is the thrust_sp.
-*         4. thrustToAttitude ref to https://github.com/PX4/Firmware/blob/master/src/modules/mc_pos_control/Utility/ControlMath.cpp
-*         5. For the derrive of the velocity error, we use a low-pass filter as same in PX4.
-*                   Ref to: https://github.com/PX4/Firmware/blob/master/src/lib/controllib/BlockDerivative.cpp
-*                           https://github.com/PX4/Firmware/blob/master/src/lib/controllib/BlockLowPass.cpp
-*         6. 没有考虑积分器清零的情况，在降落时 或者突然换方向机动时，积分器需要清0
-*         7. 推力到欧拉角基本与PX4吻合，但是在极端情况下不吻合。如：z轴期望值为-100时。
-***************************************************************************************************************************/
 #ifndef POS_CONTROLLER_PID_H
 #define POS_CONTROLLER_PID_H
-
 #include <Eigen/Eigen>
 #include <math.h>
 #include <math_utils.h>
@@ -216,27 +197,6 @@ void pos_controller_PID::_positionController(Eigen::Vector3d pos_sp, Eigen::Vect
 
 void pos_controller_PID::_velocityController()
 {
-    // Generate desired thrust setpoint.
-    // PID
-    // u_des = P(error_vel) + D(error_vel_dot) + I(vel_integral)
-    // Umin <= u_des <= Umax
-    //
-    // Anti-Windup:
-    // u_des = _thrust_sp; y = _vel_sp; r = _vel
-    // u_des >= Umax and r - y >= 0 => Saturation = true
-    // u_des >= Umax and r - y <= 0 => Saturation = false
-    // u_des <= Umin and r - y <= 0 => Saturation = true
-    // u_des <= Umin and r - y >= 0 => Saturation = false
-    //
-    // 	Notes:
-    // - control output in Z-direction has priority over XY-direction
-    // - the equilibrium point for the PID is at hover-thrust
-
-    // - the desired thrust in Z-direction is limited by the thrust limits
-    // - the desired thrust in XY-direction is limited by the thrust excess after
-    // 	 consideration of the desired thrust in Z-direction. In addition, the thrust in
-    // 	 XY-direction is also limited by the maximum tilt.
-
     Eigen::Vector3d error_vel = vel_setpoint - vel_drone;
 
     vel_P_output(0) = MPC_XY_VEL_P * error_vel(0);
@@ -344,16 +304,7 @@ void pos_controller_PID::printf_result()
 
     cout<<setprecision(2);
 
-//    cout << "delta_time : " << delta_time<< " [s] " <<endl;
-
     cout << "Velocity_sp  [X Y Z] : " << vel_setpoint[0] << " [m/s] "<< vel_setpoint[1]<<" [m/s] "<<vel_setpoint[2]<<" [m/s] "<<endl;
-
-//    cout << "Vel_P_output [X Y Z] : " << vel_P_output[0] << " [m/s] "<< vel_P_output[1]<<" [m/s] "<<vel_P_output[2]<<" [m/s] "<<endl;
-
-//    cout << "Vel_I_output [X Y Z] : " << thurst_int[0] << " [m/s] "<< thurst_int[1]<<" [m/s] "<<thurst_int[2]<<" [m/s] "<<endl;
-
-//    cout << "Vel_D_output [X Y Z] : " << vel_D_output[0] << " [m/s] "<< vel_D_output[1]<<" [m/s] "<<vel_D_output[2]<<" [m/s] "<<endl;
-
     cout << "thrust_sp    [X Y Z] : " << thrust_sp[0] << " [m/s^2] "<< thrust_sp[1]<<" [m/s^2] "<<thrust_sp[2]<<" [m/s^2] "<<endl;
 }
 

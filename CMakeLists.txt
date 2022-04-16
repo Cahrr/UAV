@@ -19,7 +19,8 @@ find_package(catkin REQUIRED COMPONENTS
   tf2_eigen
   mavros_msgs
   message_generation
-  darknet_ros_msgs
+  aruco_msgs
+#  darknet_ros_msgs
   image_transport
   cv_bridge
 )
@@ -118,38 +119,14 @@ target_link_libraries(px4_pos_estimator
   ${catkin_LIBRARIES}
 )
 
-add_executable(px4_sender
-  src/px4_sender.cpp
-)
-add_dependencies(px4_sender px4_command_gencpp)
-target_link_libraries(px4_sender
-  ${catkin_LIBRARIES}
-)
-
+###### pose gesture control ##########
 add_executable(px4_gesture_control
-  src/px4_gesture_to_mavros.cpp
+  src/px4_gesture_control.cpp
 )
 add_dependencies(px4_gesture_control px4_command_gencpp)
 target_link_libraries(px4_gesture_control
   ${catkin_LIBRARIES}
 )
-
-add_executable(px4_auto_takeoff
-  src/px4_auto_takeoff.cpp
-)
-add_dependencies(px4_auto_takeoff px4_command_gencpp)
-target_link_libraries(px4_auto_takeoff
-  ${catkin_LIBRARIES}
-)
-
-add_executable(path
-  src/path.cpp
-)
-add_dependencies(path px4_command_gencpp)
-target_link_libraries(path
-  ${catkin_LIBRARIES}
-)
-###### Test File ##########
 
 
 ###### Utilities File ##########
@@ -161,70 +138,38 @@ target_link_libraries(TFmini
   ${catkin_LIBRARIES}
 )
 
-##
-add_executable(fake_vicon
-  src/Utilities/fake_vicon.cpp
-)
-add_dependencies(fake_vicon px4_command_gencpp)
-target_link_libraries(fake_vicon
-  ${catkin_LIBRARIES}
-)
-
-add_executable(move
-  src/Utilities/move.cpp
-)
-add_dependencies(move px4_command_gencpp)
-target_link_libraries(move
-  ${catkin_LIBRARIES}
-)
-
-##
-add_executable(set_mode
-  src/Utilities/set_mode.cpp
-)
-add_dependencies(set_mode px4_command_gencpp)
-target_link_libraries(set_mode
-  ${catkin_LIBRARIES}
-)
-
-add_executable(eigen_test
-  src/Utilities/eigen_test.cpp
-)
-add_dependencies(eigen_test px4_command_gencpp)
-target_link_libraries(eigen_test
-  ${catkin_LIBRARIES}
-)
-add_executable(Data_log
-  src/Utilities/Data_log.cpp
-)
-add_dependencies(Data_log px4_command_gencpp)
-target_link_libraries(Data_log
-  ${catkin_LIBRARIES}
-)
-
 ###### Application File ##########
+
+
+#add_executable(mission_cys
+#  src/Application/mission_cys.cpp
+#)
+#add_dependencies(mission_cys px4_command_gencpp)
+#target_link_libraries(mission_cys
+#  ${catkin_LIBRARIES}
+#)
+
+#add_executable(mission_zgjqrds
+ # src/Application/mission_zgjqrds.cpp
+#)
+#add_dependencies(mission_zgjqrds px4_command_gencpp)
+#target_link_libraries(mission_zgjqrds
+ # ${catkin_LIBRARIES}
+#)
+
+add_executable(auto_takeoff
+  src/Application/auto_takeoff.cpp
+)
+add_dependencies(auto_takeoff px4_command_gencpp)
+target_link_libraries(auto_takeoff
+  ${catkin_LIBRARIES}
+)
+
 add_executable(square
   src/Application/square.cpp
 )
 add_dependencies(square px4_command_gencpp)
 target_link_libraries(square
-  ${catkin_LIBRARIES}
-)
-
-add_executable(autonomous_landing
-  src/Application/autonomous_landing.cpp
-)
-add_dependencies(autonomous_landing px4_command_gencpp)
-target_link_libraries(autonomous_landing
-  ${catkin_LIBRARIES}
-)
-
-
-add_executable(target_tracking
-  src/Application/target_tracking.cpp
-)
-add_dependencies(target_tracking px4_command_gencpp)
-target_link_libraries(target_tracking
   ${catkin_LIBRARIES}
 )
 
@@ -235,14 +180,54 @@ add_dependencies(collision_avoidance px4_command_gencpp)
 target_link_libraries(collision_avoidance
   ${catkin_LIBRARIES}
 )
-add_executable(collision_avoidance_streo
-  src/Application/collision_avoidance_streo.cpp
+
+add_executable(vision_track
+  src/Application/vision_track.cpp
 )
-add_dependencies(collision_avoidance_streo px4_command_gencpp)
-target_link_libraries(collision_avoidance_streo
+add_dependencies(vision_track px4_command_gencpp)
+target_link_libraries(vision_track
   ${catkin_LIBRARIES}
 )
 
+add_executable(ABCdemo
+  src/Application/4x4ABCdemo.cpp
+)
+add_dependencies(ABCdemo px4_command_gencpp)
+target_link_libraries(ABCdemo
+  ${catkin_LIBRARIES}
+)
+
+
+add_executable(px4_vel_controller
+  src/px4_vel_controller.cpp
+)
+add_dependencies(px4_vel_controller px4_command_gencpp)
+target_link_libraries(px4_vel_controller
+  ${catkin_LIBRARIES}
+)
+#add_executable(crossing_door_darknet
+#  src/Application/crossing_door_darknet.cpp
+#)
+#add_dependencies(crossing_door_darknet px4_command_gencpp)
+#target_link_libraries(crossing_door_darknet
+#  ${catkin_LIBRARIES}
+#)
+
+#add_executable(firematch
+#  src/Application/firematch.cpp
+#)
+#add_dependencies(firematch px4_command_gencpp)
+#target_link_libraries(firematch
+#  ${catkin_LIBRARIES}
+#)
+
+#add_executable(flytwopoints
+#  src/Application/flytwopoints.cpp
+#)
+#add_dependencies(flytwopoints px4_command_gencpp)
+#target_link_libraries(flytwopoints
+#  ${catkin_LIBRARIES}
+#)
 
 ## Rename C++ executable without prefix
 ## The above recommended prefix causes long target names, the following renames the

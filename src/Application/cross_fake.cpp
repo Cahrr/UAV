@@ -61,17 +61,10 @@ int main(int argc, char **argv)
     }
     else return -1;
 
-    int takeoff_flag;
-    cout << "Whether choose to Takeoff? 1 for Takeoff, 0 for quit "<<endl;
-    cin >> takeoff_flag;
-    if(takeoff_flag != 1)
-    {
-        return -1;
-    }
     int i=0;
     int comid = 0;
     //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>主程序<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-    //takeoff
+    //point takeoff
     i = 0;
     while (i < sleep_time)
     {

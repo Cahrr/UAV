@@ -1,3 +1,4 @@
+
 #include <ros/ros.h>
 
 //topic 头文件
@@ -9,9 +10,20 @@
 #include <sensor_msgs/LaserScan.h>
 #include <cmath>
 #include <stdlib.h>
+
+#include <std_msgs/Int8.h>
+#include <std_msgs/String.h>
+#include <image_transport/image_transport.h>
+#include <cv_bridge/cv_bridge.h>
+#include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/highgui/highgui.hpp>
 #include <math_utils.h>
 
+
+
+
 using namespace std;
+
 //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>全 局 变 量<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 enum Command
 {
@@ -25,29 +37,45 @@ enum Command
     Failsafe_land,
     Idle
 };
+
+#define RAD2DEG(x) ((x)*180./M_PI)
+#define Height 480
+#define Width 640
 //--------------------------------------------输入--------------------------------------------------
 sensor_msgs::LaserScan Laser;                                   //激光雷达点云数据
-geometry_msgs::PoseStamped pos_drone;                                  //无人机当前位置
-Eigen::Quaterniond q_fcu;
-Eigen::Vector3d Euler_fcu;
+geometry_msgs::PoseStamped pos_drone;                           //无人机当前位置
 float target_x;                                                 //期望位置_x
 float target_y;                                                 //期望位置_y
 int range_min;                                                //激光雷达探测范围 最小角度
 int range_max;                                                //激光雷达探测范围 最大角度
 float last_time = 0;
-float fly_height;
 //--------------------------------------------算法相关--------------------------------------------------
 float R_outside,R_inside;                                       //安全半径 [避障算法相关参数]
 float p_R;                                                      //大圈比例参数
 float p_r;                                                      //小圈比例参数
+
 float distance_c,angle_c;                                       //最近障碍物距离 角度
 float distance_cx,distance_cy;                                  //最近障碍物距离XY
 float vel_collision[2];                                         //躲避障碍部分速度
 float vel_collision_max;                                        //躲避障碍部分速度限幅
+
 float p_xy;                                                     //追踪部分位置环P
 float vel_track[2];                                             //追踪部分速度
 float vel_track_max;                                            //追踪部分速度限幅
 int flag_land;                                                  //降落标志位
+
+int flag_hold;                                                 //dyx
+
+Eigen::Quaterniond q_fcu;                                       //飞机姿态四元数
+Eigen::Vector3d Euler_fcu;                                      //飞机姿态欧拉角
+float fly_height;                                               //设定的飞行高度
+//--------------------------------------------4X4往返demo用-------------------------------------------------
+float A_x,A_y;                                                   //A点坐标
+float B_x,B_y;                                                   //B点坐标
+float C_x,C_y;                                                   //C点坐标
+bool reach_ABC_flag[3];                                          //到达ABC的标志
+bool return_origin_flag[3];                                      //分别从ABC返回的标志
+int ABC;
 //--------------------------------------------输出--------------------------------------------------
 std_msgs::Bool flag_collision_avoidance;                       //是否进入避障模式标志位
 float vel_sp_body[2];                                           //总速度
@@ -59,7 +87,7 @@ void cal_min_distance();
 float satfunc(float data, float Max);
 void printf();                                                                       //打印函数
 void printf_param();                                                                 //打印各项参数以供检查
-void collision_avoidance(float target_x,float target_y);
+void collision_avoidance(float target_x,float target_y);                             //人工势场法壁障
 // 【坐标系旋转函数】- 机体系到enu系
 // input是机体系,output是惯性系，yaw_angle是当前偏航角
 void rotation_yaw(float yaw_angle, float input[2], float output[2])
@@ -107,32 +135,42 @@ void lidar_cb(const sensor_msgs::LaserScan::ConstPtr& scan)
     cal_min_distance();
 }
 
+
+//当前无人机坐标，六轴
 void pos_cb(const geometry_msgs::PoseStamped::ConstPtr &msg)
 {
     pos_drone = *msg;
     // Read the Quaternion from the Mavros Package [Frame: ENU]
     Eigen::Quaterniond q_fcu_enu(msg->pose.orientation.w, msg->pose.orientation.x, msg->pose.orientation.y, msg->pose.orientation.z);
+
     q_fcu = q_fcu_enu;
+
     //Transform the Quaternion to Euler Angles
     Euler_fcu = quaternion_to_euler(q_fcu);
 }
 //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>主 函 数<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 int main(int argc, char **argv)
 {
-    ros::init(argc, argv, "collision_avoidance");
+    ros::init(argc, argv, "4x4ABC");
     ros::NodeHandle nh("~");
+    image_transport::ImageTransport it(nh);
+
     // 频率 [20Hz]
     ros::Rate rate(20.0);
+
     //【订阅】Lidar数据
-    ros::Subscriber lidar_sub = nh.subscribe<sensor_msgs::LaserScan>("/scan", 1000, lidar_cb);
+    ros::Subscriber lidar_sub = nh.subscribe<sensor_msgs::LaserScan>("/scan", 1000, lidar_cb);//dyx
+    //ros::Subscriber lidar_sub = nh.subscribe<sensor_msgs::LaserScan>("/lidar2Dscan", 1000, lidar_cb);//dyx
+
     //【订阅】无人机当前位置 坐标系 NED系
-    ros::Subscriber position_sub = nh.subscribe<geometry_msgs::PoseStamped>("/mavros/local_position/pose", 100, pos_cb);
+    //ros::Subscriber position_sub = nh.subscribe<geometry_msgs::Pose>("/drone/pos", 100, pos_cb);
+    ros::Subscriber position_sub = nh.subscribe<geometry_msgs::PoseStamped>("/mavros/local_position/pose", 100, pos_cb);  //dyx
+
     // 【发布】发送给position_control.cpp的命令
     ros::Publisher command_pub = nh.advertise<px4_command::command>("/px4/command", 10);
-
+    //【发布】发送给gestrue control的命令，帮助Arm与Takeoff
+    ros::Publisher gesture_pub = nh.advertise<std_msgs::String>("/gesture/command", 10);
     //读取参数表中的参数
-    nh.param<float>("target_x", target_x, 1.0); //dyx
-    nh.param<float>("target_y", target_y, 0.0); //dyx
 
     nh.param<float>("R_outside", R_outside, 2);
     nh.param<float>("R_inside", R_inside, 1);
@@ -149,7 +187,18 @@ int main(int argc, char **argv)
 
     nh.param<int>("range_min", range_min, 0.0);
     nh.param<int>("range_max", range_max, 0.0);
+
+    nh.param<float>("A_x", A_x, 0.0);
+    nh.param<float>("A_y", A_y, 0.0);
+    nh.param<float>("B_x", B_x, 0.0);
+    nh.param<float>("B_y", B_y, 0.0);
+    nh.param<float>("C_x", C_x, 0.0);
+    nh.param<float>("C_y", C_y, 0.0);
+
+    //获取设定的起飞高度
     nh.getParam("/px4_pos_controller/Takeoff_height",fly_height);
+    fly_height = 0.5;
+
     //打印现实检查参数
     printf_param();
 
@@ -182,11 +231,9 @@ int main(int argc, char **argv)
     }
     else return -1;
 
-    //check start collision_avoid
-    int start_flag;
-    cout<<"Whether choose to Start mission? 1 for start, 0 for quit"<<endl;
-    cin >> start_flag;
-    if(Take_off_flag != 1) return -1;
+    cout<<"Which point you choose? 1 for A, 2 for B, 3 for C"<<endl;
+    cin >> ABC;
+
 
     //初值
     vel_track[0]= 0;
@@ -201,17 +248,138 @@ int main(int argc, char **argv)
     vel_sp_ENU[0]= 0;
     vel_sp_ENU[1]= 0;
 
+    //四向最小距离 初值
     flag_land = 0;
 
+    flag_hold = 0;                    //dyx
+
+
+    //输出指令初始化
     int comid = 1;
+
+
 //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>Main Loop<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-    while (ros::ok())
+    while(ros::ok())
     {
         //回调一次 更新传感器状态
         //1. 更新雷达点云数据，存储在Laser中,并计算四向最小距离
         ros::spinOnce();
-        collision_avoidance(target_x,target_y);
+        /**************************dyx****************************************/
+        //模式2策略：ABC三点坐标已知，每次飞往ABC三点与返回原点时设定标志。
+        if(ABC==1)
+        {
+            if(!reach_ABC_flag[0])  //飞到A点，标记1，
+            {
+                collision_avoidance(A_x,A_y);
+                float abs_distance;
+                abs_distance = sqrt((pos_drone.pose.position.x - A_x) * (pos_drone.pose.position.x -A_x) + (pos_drone.pose.position.y - A_y) * (pos_drone.pose.position.y - A_y));
+                //cout<<"abs_distance: "<<abs_distance<<endl;
+                if(abs_distance < 0.3 )
+                {
+                    reach_ABC_flag[0]=true;
+                }
+            }
+            else if(!return_origin_flag[0]) //返航，标记，
+            {
+                collision_avoidance(0,0);
+                float abs_distance;
+                abs_distance = sqrt((pos_drone.pose.position.x ) * (pos_drone.pose.position.x) + (pos_drone.pose.position.y ) * (pos_drone.pose.position.y ));
+                if(abs_distance < 0.1 )
+                {   
+                    return_origin_flag[0]=true;
+                    for (int i=0; i<5; i++)
+                    {
+                        Command_now.command = Hold;
+                        Command_now.sub_mode = 0x00;
+                        command_pub.publish(Command_now);
+                        flag_hold = 1;
+                        rate.sleep();
+                    }
+                    cout<<"Which point you choose? 1 for A, 2 for B, 3 for C, 0 for Land"<<endl;
+                    cin >> ABC;
+                }
+            }
+        }
+        else if(ABC==2)
+        {
+            if(!reach_ABC_flag[1])
+            {
+                collision_avoidance(B_x,B_y);
+                float abs_distance;
+                abs_distance = sqrt((pos_drone.pose.position.x - B_x) * (pos_drone.pose.position.x -B_x) + (pos_drone.pose.position.y - B_y) * (pos_drone.pose.position.y - B_y));
+                //cout<<"abs_distance: "<<abs_distance<<endl;
+                if(abs_distance < 0.3 )
+                {
+                    reach_ABC_flag[1]=true;
+                }
 
+            }
+            else if(!return_origin_flag[1])  //返航，标记，
+            {
+                collision_avoidance(0,0);
+                float abs_distance;
+                abs_distance = sqrt((pos_drone.pose.position.x ) * (pos_drone.pose.position.x) + (pos_drone.pose.position.y ) * (pos_drone.pose.position.y ));
+                if(abs_distance < 0.1 )
+                {   
+                    return_origin_flag[1]=true;
+                    for (int i=0; i<5; i++)
+                    {
+                        Command_now.command = Hold;
+                        Command_now.sub_mode = 0x00;
+                        command_pub.publish(Command_now);
+                        flag_hold = 1;
+                        rate.sleep();
+                    }
+                    cout<<"Which point you choose? 1 for A, 2 for B, 3 for C, 0 for Land"<<endl;
+                    cin >> ABC;
+                }
+
+            }
+        }
+        else if(ABC==3)
+        {
+            if(!reach_ABC_flag[2])
+            {
+                collision_avoidance(C_x,C_y);
+                float abs_distance;
+                abs_distance = sqrt((pos_drone.pose.position.x - C_x) * (pos_drone.pose.position.x -C_x) + (pos_drone.pose.position.y - C_y) * (pos_drone.pose.position.y - C_y));
+                //cout<<"abs_distance: "<<abs_distance<<endl;
+                if(abs_distance < 0.3 )
+                {
+                    reach_ABC_flag[2]=true;
+                }
+
+            }
+            else if(!return_origin_flag[2])  //返航，标记，
+            {
+                collision_avoidance(0,0);
+                float abs_distance;
+                abs_distance = sqrt((pos_drone.pose.position.x ) * (pos_drone.pose.position.x) + (pos_drone.pose.position.y ) * (pos_drone.pose.position.y ));
+                if(abs_distance < 0.1 )
+                {
+                    return_origin_flag[2]=true;
+                    for (int i=0; i<5; i++)
+                    {
+                        Command_now.command = Hold;
+                        Command_now.sub_mode = 0x00;
+                        command_pub.publish(Command_now);
+                        flag_hold = 1;
+                        rate.sleep();
+                    }
+                    cout<<"Which point you choose? 1 for A, 2 for B, 3 for C, 0 for Land"<<endl;
+                    cin >> ABC;
+                }
+            }
+
+        }
+        else if(ABC==0)
+        {
+            flag_land=1;
+        }
+
+
+        /**************************dyx****************************************/
+        //启用ENU下的指令
         Command_now.command = Move_ENU;     //机体系下移动
         Command_now.comid = comid;
         comid++;
@@ -221,46 +389,135 @@ int main(int argc, char **argv)
         Command_now.pos_sp[2] =  fly_height;
         Command_now.yaw_sp = 0 ;
 
-        float abs_distance;
-        abs_distance = sqrt((pos_drone.pose.position.x - target_x) * (pos_drone.pose.position.x - target_x) + (pos_drone.pose.position.y - target_y) * (pos_drone.pose.position.y - target_y));
-        if(abs_distance < 0.3 || flag_land == 1)
-        {
-            Command_now.command = 3;     //Land
-            flag_land = 1;
-        }
+
         if(flag_land == 1) Command_now.command = Land;
+        if(flag_hold == 1) 
+        {
+           Command_now.command = Hold;
+           flag_hold = 0;
+        }
+
         command_pub.publish(Command_now);
+
         //打印
         printf();
+
         rate.sleep();
+
     }
+
     return 0;
+
 }
+
 
 //计算前后左右四向最小距离
 void cal_min_distance()
 {
+
     distance_c = Laser.ranges[range_min];
     angle_c = 0;
+    //for (int i = range_min*2; i <= range_max*2; i++)
     for (int i = range_min; i <= range_max; i++)
     {
         if(Laser.ranges[i] < distance_c)
         {
             distance_c = Laser.ranges[i];
+            //angle_c = i/2;
             angle_c = i;
         }
     }
 }
 
+
 //饱和函数
 float satfunc(float data, float Max)
 {
-    if(abs(data)>Max) return ( data > 0 ) ? Max : -Max;
-    else return data;
+    if(abs(data)>Max)
+    {
+        return ( data > 0 ) ? Max : -Max;
+    }
+    else
+    {
+        return data;
+    }
 }
 
+
+void printf()
+{
+
+    cout <<">>>>>>>>>>>>>>>>>>>>>>>>>>>>>collision_avoidance<<<<<<<<<<<<<<<<<<<<<<<<<<<<<" <<endl;
+
+    cout << "Minimun_distance : "<<endl;
+    cout << "Distance : " << distance_c << " [m] "<<endl;
+    cout << "Angle :    " << angle_c    << " [du] "<<endl;
+    cout << "distance_cx :    " << distance_cx    << " [m] "<<endl;
+    cout << "distance_cy :    " << distance_cy    << " [m] "<<endl;
+
+
+    if(flag_collision_avoidance.data == true)
+    {
+        cout << "Collision avoidance Enabled "<<endl;
+    }
+    else
+    {
+        cout << "Collision avoidance Disabled "<<endl;
+    }
+
+    cout << "vel_track_x : " << vel_track[0] << " [m/s] "<<endl;
+    cout << "vel_track_y : " << vel_track[1] << " [m/s] "<<endl;
+
+    cout << "vel_collision_x : " << vel_collision[0] << " [m/s] "<<endl;
+    cout << "vel_collision_y : " << vel_collision[1] << " [m/s] "<<endl;
+
+    //cout << "vel_sp_x : " << vel_sp_body[0] << " [m/s] "<<endl;
+    //cout << "vel_sp_y : " << vel_sp_body[1] << " [m/s] "<<endl;
+
+    cout << "vel_sp_x : " << vel_sp_ENU[0] << " [m/s] "<<endl;
+    cout << "vel_sp_y : " << vel_sp_ENU[1] << " [m/s] "<<endl;
+
+    //ROS_WARN("CostMap Area: 16m2");
+    double time_now = ros::Time::now().toSec();
+    float interval = rand()/double(RAND_MAX)*0.3+1;
+    //ROS_WARN("Navigation Serch cost time: %fs", interval);
+    float search_speed = 16/interval;
+    //ROS_WARN("Serch speed: %fm2/s", search_speed);
+    last_time = time_now;
+
+
+}
+
+void printf_param()
+{
+    cout <<">>>>>>>>>>>>>>>>>>>>>>>>>>>>>> Parameter <<<<<<<<<<<<<<<<<<<<<<<<<<<" <<endl;
+
+
+    cout << "R_outside : "<< R_outside << endl;
+    cout << "R_inside : "<< R_inside << endl;
+
+    cout << "p_xy : "<< p_xy << endl;
+    cout << "vel_track_max : "<< vel_track_max << endl;
+
+    cout << "p_R : "<< p_R << endl;
+    cout << "p_r : "<< p_r << endl;
+
+    cout << "vel_collision_max : "<< vel_collision_max << endl;
+
+    cout << "vel_sp_max : "<< vel_sp_max << endl;
+    cout << "range_min : "<< range_min << endl;
+    cout << "range_max : "<< range_max << endl;
+    cout << "A : "<< A_x<<" "<<A_y<< endl;
+    cout << "B : "<< B_x<<" "<<B_y<< endl;
+    cout << "C : "<< C_x<<" "<<C_y<< endl;
+    cout<<"fly heigh: "<<fly_height<<endl;
+
+
+}
 void collision_avoidance(float target_x,float target_y)
 {
+
+
     //2. 根据最小距离判断：是否启用避障策略
     if (distance_c >= R_outside )
     {
@@ -288,6 +545,8 @@ void collision_avoidance(float target_x,float target_y)
     {
         distance_cx = distance_c * cos(angle_c/180*3.1415926);
         distance_cy = distance_c * sin(angle_c/180*3.1415926);
+
+        //distance_cx = - distance_cx;  //dyx
 
         float F_c;
 
@@ -327,6 +586,8 @@ void collision_avoidance(float target_x,float target_y)
         }else{
             vel_collision[1] = vel_collision[1] - F_c * distance_cy /distance_c;
         }
+
+
         //避障速度限幅
         for (int i = 0; i < 2; i++)
         {
@@ -335,7 +596,12 @@ void collision_avoidance(float target_x,float target_y)
     }
 
     vel_sp_body[0] = vel_track[0] + vel_collision[0];
+    //vel_sp_body[1] = vel_track[1] - vel_collision[1]; //dyx
     vel_sp_body[1] = vel_track[1] + vel_collision[1]; //dyx
+    //vel_sp_body[0] = vel_track[0];
+    //vel_sp_body[1] = vel_track[1];
+    //vel_sp_body[0] = 0.1;
+    //vel_sp_body[1] = 0;
 
     //找当前位置到目标点的xy差值，如果出现其中一个差值小，另一个差值大，
     //且过了一会还是保持这个差值就开始从差值入手。
@@ -346,65 +612,5 @@ void collision_avoidance(float target_x,float target_y)
         vel_sp_body[i] = satfunc(vel_sp_body[i],vel_sp_max);
     }
     rotation_yaw(Euler_fcu[2],vel_sp_body,vel_sp_ENU);
+
 }
-
-void printf()
-{
-    cout <<">>>>>>>>>>>>>>>>>>>>>>>>>>>>>collision_avoidance<<<<<<<<<<<<<<<<<<<<<<<<<<<<<" <<endl;
-    cout << "Minimun_distance : "<<endl;
-    cout << "Distance : " << distance_c << " [m] "<<endl;
-    cout << "Angle :    " << angle_c    << " [du] "<<endl;
-    cout << "distance_cx :    " << distance_cx    << " [m] "<<endl;
-    cout << "distance_cy :    " << distance_cy    << " [m] "<<endl;
-    if(flag_collision_avoidance.data == true)
-    {
-        cout << "Collision avoidance Enabled "<<endl;
-    }
-    else
-    {
-        cout << "Collision avoidance Disabled "<<endl;
-    }
-    cout << "vel_track_x : " << vel_track[0] << " [m/s] "<<endl;
-    cout << "vel_track_y : " << vel_track[1] << " [m/s] "<<endl;
-
-    cout << "vel_collision_x : " << vel_collision[0] << " [m/s] "<<endl;
-    cout << "vel_collision_y : " << vel_collision[1] << " [m/s] "<<endl;
-
-    cout << "vel_sp_x : " << vel_sp_ENU[0] << " [m/s] "<<endl;
-    cout << "vel_sp_y : " << vel_sp_ENU[1] << " [m/s] "<<endl;
-}
-
-void printf_param()
-{
-    cout <<">>>>>>>>>>>>>>>>>>>>>>>>>>>>>> Parameter <<<<<<<<<<<<<<<<<<<<<<<<<<<" <<endl;
-    cout << "target_x : "<< target_x << endl;
-    cout << "target_y : "<< target_y << endl;
-
-    cout << "R_outside : "<< R_outside << endl;
-    cout << "R_inside : "<< R_inside << endl;
-
-    cout << "p_xy : "<< p_xy << endl;
-    cout << "vel_track_max : "<< vel_track_max << endl;
-
-    cout << "p_R : "<< p_R << endl;
-    cout << "p_r : "<< p_r << endl;
-
-    cout << "vel_collision_max : "<< vel_collision_max << endl;
-
-    cout << "vel_sp_max : "<< vel_sp_max << endl;
-    cout << "range_min : "<< range_min << endl;
-    cout << "range_max : "<< range_max << endl;
-    cout<<"fly heigh: "<<fly_height<<endl;
-}
-
-
-
-
-
-
-
-
-
-
-
-

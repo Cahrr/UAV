@@ -1,13 +1,3 @@
-/***************************************************************************************************************************
-* Frame_tf_utils.h
-*
-* Author: Qyp
-*
-* Update Time: 2019.3.16
-*
-* Introduction:  utils functions for frame transform
-*         1. Coby from mavros source code  /mavros/mavros/src/lib/ftf_frame_conversions.cpp
-***************************************************************************************************************************/
 #ifndef FRAME_TF_UTILS_H
 #define FRAME_TF_UTILS_H
 
